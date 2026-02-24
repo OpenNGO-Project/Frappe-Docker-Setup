@@ -122,3 +122,4 @@ Open site:
 - The script is designed around the Frappe Docker/devcontainer flow.
 - If running outside a devcontainer in Docker mode, internal compose service hostnames may not be reachable from your host shell.
 - Use `--bare-metal` if you want to connect to locally running MariaDB/Redis (`localhost`).
+- Thanks to Antony for the original outline in the Frappe Forum https://discuss.frappe.io/t/tutorial-erpnext-v16-local-docker-setup-for-development/159165/14
