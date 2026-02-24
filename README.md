@@ -10,6 +10,16 @@ It helps with common setup pain points by:
 - Installing ERPNext (and optional apps)
 - Auto-starting MariaDB/Redis services from Docker Compose when needed
 
+## Simplest way to run
+```bash
+./setup_v16.sh --init-vscode
+```
+Follow instrucutions to open VS-Code inside Docker and run it again:
+```bash
+./setup_v16.sh
+```
+
+
 ## What This Script Supports
 
 - DevContainer-based setup (recommended)
