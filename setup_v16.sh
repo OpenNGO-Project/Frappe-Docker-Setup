@@ -708,6 +708,40 @@ setup_devcontainer() {
     fi
 }
 
+remove_intellicode_extension() {
+    local devcontainer_json="$1"
+    local tmp_file
+
+    if [ ! -f "$devcontainer_json" ]; then
+        return 0
+    fi
+
+    tmp_file="$(mktemp)"
+    awk '
+        /"visualstudioexptteam\.vscodeintellicode"/ { next }
+        { print }
+    ' "$devcontainer_json" > "$tmp_file"
+    mv "$tmp_file" "$devcontainer_json"
+}
+
+fix_python_interpreter_path() {
+    local settings_file="$1"
+    local tmp_file
+
+    if [ ! -f "$settings_file" ]; then
+        return 0
+    fi
+
+    tmp_file="$(mktemp)"
+    awk '
+        {
+            gsub("\\$\\{workspaceFolder\\}/frappe-bench/env/bin/python", "/usr/bin/python3")
+            print
+        }
+    ' "$settings_file" > "$tmp_file"
+    mv "$tmp_file" "$settings_file"
+}
+
 prompt_vscode_runtime_config() {
     local input
     local socketio_default
@@ -859,6 +893,11 @@ setup_vscode_config() {
     else
         print_warning "development/vscode-example not found, skipping..."
     fi
+
+    fix_python_interpreter_path "$CLONE_DIR_ABS/development/vscode-example/settings.json"
+    fix_python_interpreter_path "$CLONE_DIR_ABS/development/.vscode/settings.json"
+    remove_intellicode_extension "$CLONE_DIR_ABS/devcontainer-example/devcontainer.json"
+    remove_intellicode_extension "$CLONE_DIR_ABS/.devcontainer/devcontainer.json"
 }
 
 install_vscode_extensions() {
