@@ -22,6 +22,8 @@
 #   --docker-project-dir  Compose project directory (default: current dir)
 #   --docker-project-name Compose project name/container prefix
 #                         (also used for VS Code DevContainer setup)
+#   --docker-app-port     Host port to expose Docker frontend service
+#                         (starts compose 'frontend'; default from compose)
 #   --clone-dir           Directory to clone frappe_docker to (default: frappe_docker)
 #                         (used automatically if compose file is missing)
 #   --install-webshop     Install webshop app
@@ -66,6 +68,8 @@ SKIP_DOCKER_UP=false
 DOCKER_COMPOSE_FILE=""
 DOCKER_PROJECT_DIR="$(pwd)"
 DOCKER_PROJECT_NAME=""
+FRONTEND_PORT="${FRONTEND_PORT:-}"
+SOCKETIO_HOST_PORT="${SOCKETIO_HOST_PORT:-}"
 INSTALL_WEBSHOP=false
 INSTALL_HRMS=false
 INSTALL_CRM=false
@@ -149,6 +153,8 @@ Options:
   --docker-project-dir  Compose project directory (default: current dir)
   --docker-project-name Compose project name/container prefix
                         (also used for VS Code DevContainer setup)
+  --docker-app-port     Host port to expose Docker frontend service
+                        (starts compose 'frontend'; default from compose)
   --clone-dir           Directory to clone frappe_docker to (default: frappe_docker)
                         (used automatically if compose file is missing)
   --install-webshop     Install webshop app
@@ -174,6 +180,9 @@ Examples:
 
   # Use a specific compose file to start MariaDB/Redis
   ./setup_v16.sh --docker-compose-file ../pwd.yml --docker-project-dir ..
+
+  # Also start Docker frontend on host port 8090
+  ./setup_v16.sh --docker-compose-file ../pwd.yml --docker-project-dir .. --docker-app-port 8090
 
   # One-command bootstrap (auto-clones frappe_docker if compose is missing)
   ./setup_v16.sh --clone-dir frappe_docker
@@ -246,6 +255,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --docker-project-name)
             DOCKER_PROJECT_NAME="$2"
+            shift 2
+            ;;
+        --docker-app-port)
+            FRONTEND_PORT="$2"
+            if ! [[ "$FRONTEND_PORT" =~ ^[0-9]+$ ]] || [ "$FRONTEND_PORT" -lt 1 ] || [ "$FRONTEND_PORT" -gt 65535 ]; then
+                print_error "Invalid --docker-app-port: $FRONTEND_PORT (expected 1-65535)"
+                exit 1
+            fi
             shift 2
             ;;
         --install-webshop)
@@ -557,19 +574,49 @@ start_docker_services() {
     fi
 
     local services="$DB_SERVICE $REDIS_CACHE_SERVICE"
+    local frontend_started=false
+    local frontend_override_file=""
+    local compose_file_args=()
     if [ "$REDIS_QUEUE_SERVICE" != "$REDIS_CACHE_SERVICE" ]; then
         services="$services $REDIS_QUEUE_SERVICE"
     fi
     if [ "$REDIS_SOCKETIO_SERVICE" != "$REDIS_QUEUE_SERVICE" ] && [ "$REDIS_SOCKETIO_SERVICE" != "$REDIS_CACHE_SERVICE" ]; then
         services="$services $REDIS_SOCKETIO_SERVICE"
     fi
+    if [ -n "$FRONTEND_PORT" ] && compose_has_service "frontend"; then
+        services="$services frontend"
+        frontend_started=true
+        print_info "Docker frontend will be exposed on host port $FRONTEND_PORT"
+        frontend_override_file="$(mktemp)"
+        cat > "$frontend_override_file" << EOF
+services:
+  frontend:
+    ports:
+      - "${FRONTEND_PORT}:8080"
+EOF
+    elif [ -n "$FRONTEND_PORT" ]; then
+        print_warning "--docker-app-port provided, but compose service 'frontend' was not found"
+    fi
+
+    compose_file_args=(-f "$COMPOSE_FILE_RESOLVED")
+    if [ -n "$frontend_override_file" ]; then
+        compose_file_args+=( -f "$frontend_override_file" )
+    fi
 
     if [ "$COMPOSE_CMD" = "docker compose" ]; then
-        docker compose -f "$COMPOSE_FILE_RESOLVED" "${compose_project_args[@]}" up -d $services
+        docker compose "${compose_file_args[@]}" "${compose_project_args[@]}" up -d $services
     else
-        docker-compose -f "$COMPOSE_FILE_RESOLVED" "${compose_project_args[@]}" up -d $services
+        docker-compose "${compose_file_args[@]}" "${compose_project_args[@]}" up -d $services
     fi
+
+    if [ -n "$frontend_override_file" ]; then
+        rm -f "$frontend_override_file"
+    fi
+
     print_success "Docker services started"
+    if [ "$frontend_started" = true ]; then
+        print_info "Frontend URL: http://localhost:$FRONTEND_PORT"
+    fi
 
     wait_for_tcp "$DB_HOST" "3306" "MariaDB"
 
@@ -661,14 +708,87 @@ setup_devcontainer() {
     fi
 }
 
-configure_devcontainer_project_name() {
-    local devcontainer_dir
-    local env_file
-    local tmp_file
+prompt_vscode_runtime_config() {
+    local input
+    local socketio_default
 
-    if [ -z "$DOCKER_PROJECT_NAME" ]; then
+    if [ ! -t 0 ]; then
+        if [ -z "$DOCKER_PROJECT_NAME" ]; then
+            DOCKER_PROJECT_NAME="frappe16"
+            print_info "No TTY detected, defaulting Docker project name to '$DOCKER_PROJECT_NAME'"
+        fi
+        if [ -z "$FRONTEND_PORT" ]; then
+            FRONTEND_PORT="8000"
+            print_info "No TTY detected, defaulting Docker app port to $FRONTEND_PORT"
+        fi
+        if [ -z "$SOCKETIO_HOST_PORT" ]; then
+            SOCKETIO_HOST_PORT="9000"
+            print_info "No TTY detected, defaulting Docker Socket.IO port to $SOCKETIO_HOST_PORT"
+        fi
         return 0
     fi
+
+    if [ -z "$DOCKER_PROJECT_NAME" ]; then
+        read -r -p "Docker project name (container prefix) [frappe16]: " input
+        DOCKER_PROJECT_NAME="${input:-frappe16}"
+    fi
+
+    if [ -z "$FRONTEND_PORT" ]; then
+        while true; do
+            read -r -p "Docker app host port [8000]: " input
+            FRONTEND_PORT="${input:-8000}"
+            if [[ "$FRONTEND_PORT" =~ ^[0-9]+$ ]] && [ "$FRONTEND_PORT" -ge 1 ] && [ "$FRONTEND_PORT" -le 65535 ]; then
+                break
+            fi
+            print_warning "Please enter a valid port between 1 and 65535"
+        done
+    fi
+
+    socketio_default="${SOCKETIO_HOST_PORT:-9000}"
+    while true; do
+        read -r -p "Docker Socket.IO host port [$socketio_default]: " input
+        SOCKETIO_HOST_PORT="${input:-$socketio_default}"
+        if [[ "$SOCKETIO_HOST_PORT" =~ ^[0-9]+$ ]] && [ "$SOCKETIO_HOST_PORT" -ge 1 ] && [ "$SOCKETIO_HOST_PORT" -le 65535 ]; then
+            break
+        fi
+        print_warning "Please enter a valid port between 1 and 65535"
+    done
+}
+
+upsert_env_var() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local tmp_file
+
+    tmp_file="$(mktemp)"
+    if [ -f "$file" ]; then
+        awk -v key="$key" -v value="$value" '
+            BEGIN { replaced=0 }
+            $0 ~ "^" key "=" {
+                print key "=" value
+                replaced=1
+                next
+            }
+            { print }
+            END {
+                if (!replaced) {
+                    print key "=" value
+                }
+            }
+        ' "$file" > "$tmp_file"
+    else
+        printf '%s=%s\n' "$key" "$value" > "$tmp_file"
+    fi
+
+    mv "$tmp_file" "$file"
+}
+
+configure_devcontainer_runtime() {
+    local devcontainer_dir
+    local env_file
+    local compose_file
+    local tmp_file
 
     if [ ! -d "$CLONE_DIR_ABS" ]; then
         return 0
@@ -676,32 +796,39 @@ configure_devcontainer_project_name() {
 
     devcontainer_dir="$CLONE_DIR_ABS/.devcontainer"
     env_file="$devcontainer_dir/.env"
+    compose_file="$devcontainer_dir/docker-compose.yml"
 
     mkdir -p "$devcontainer_dir"
-    print_step "Configuring DevContainer compose project name..."
+    print_step "Persisting DevContainer Docker settings..."
 
-    if [ -f "$env_file" ]; then
+    if [ -n "$DOCKER_PROJECT_NAME" ]; then
+        upsert_env_var "$env_file" "COMPOSE_PROJECT_NAME" "$DOCKER_PROJECT_NAME"
+        print_success "DevContainer compose project name set to '$DOCKER_PROJECT_NAME'"
+    fi
+
+    if [ -n "$FRONTEND_PORT" ]; then
+        upsert_env_var "$env_file" "FRAPPE_HTTP_PORT" "$FRONTEND_PORT"
+        upsert_env_var "$env_file" "FRAPPE_SOCKETIO_PORT" "$SOCKETIO_HOST_PORT"
+        print_success "DevContainer app host ports set to '$FRONTEND_PORT' (HTTP) and '$SOCKETIO_HOST_PORT' (Socket.IO)"
+    fi
+
+    if [ -f "$compose_file" ]; then
         tmp_file="$(mktemp)"
-        awk -v value="$DOCKER_PROJECT_NAME" '
-            BEGIN { replaced=0 }
-            /^COMPOSE_PROJECT_NAME=/ {
-                print "COMPOSE_PROJECT_NAME=" value
-                replaced=1
+        awk '
+            /^[[:space:]]*-[[:space:]]*8000-8005:8000-8005[[:space:]]*$/ {
+                print "      - \"${FRAPPE_HTTP_PORT:-8000}:8000\""
+                next
+            }
+            /^[[:space:]]*-[[:space:]]*9000-9005:9000-9005[[:space:]]*$/ {
+                print "      - \"${FRAPPE_SOCKETIO_PORT:-9000}:9000\""
                 next
             }
             { print }
-            END {
-                if (!replaced) {
-                    print "COMPOSE_PROJECT_NAME=" value
-                }
-            }
-        ' "$env_file" > "$tmp_file"
-        mv "$tmp_file" "$env_file"
+        ' "$compose_file" > "$tmp_file"
+        mv "$tmp_file" "$compose_file"
     else
-        printf 'COMPOSE_PROJECT_NAME=%s\n' "$DOCKER_PROJECT_NAME" > "$env_file"
+        print_warning "DevContainer compose file not found at $compose_file"
     fi
-
-    print_success "DevContainer compose project name set to '$DOCKER_PROJECT_NAME'"
 }
 
 setup_vscode_config() {
@@ -773,15 +900,12 @@ show_vscode_instructions() {
 }
 
 run_vscode_init() {
-    if [ -n "$DOCKER_PROJECT_NAME" ] && [ "$CLONE_DIR" = "frappe_docker" ]; then
-        CLONE_DIR="$DOCKER_PROJECT_NAME"
-        print_info "Using --docker-project-name as clone dir: $CLONE_DIR"
-    fi
+    prompt_vscode_runtime_config
 
     clone_frappe_docker
     sync_script_into_development
     setup_devcontainer
-    configure_devcontainer_project_name
+    configure_devcontainer_runtime
     setup_vscode_config
     install_vscode_extensions
     show_vscode_instructions
