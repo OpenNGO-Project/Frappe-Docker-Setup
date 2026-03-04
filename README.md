@@ -10,6 +10,16 @@ It helps with common setup pain points by:
 - Installing ERPNext (and optional apps)
 - Auto-starting MariaDB/Redis services from Docker Compose when needed
 
+## Simplest way to run
+```bash
+./setup_v16.sh --init-vscode
+```
+Follow instrucutions to open VS-Code inside Docker and run it again:
+```bash
+./setup_v16.sh
+```
+
+
 ## What This Script Supports
 
 - DevContainer-based setup (recommended)
@@ -122,3 +132,4 @@ Open site:
 - The script is designed around the Frappe Docker/devcontainer flow.
 - If running outside a devcontainer in Docker mode, internal compose service hostnames may not be reachable from your host shell.
 - Use `--bare-metal` if you want to connect to locally running MariaDB/Redis (`localhost`).
+- Thanks to Antony for the original outline in the Frappe Forum https://discuss.frappe.io/t/tutorial-erpnext-v16-local-docker-setup-for-development/159165/14
