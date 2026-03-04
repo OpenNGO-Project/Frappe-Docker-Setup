@@ -20,6 +20,8 @@
 #   --skip-docker-up      Skip starting Docker services
 #   --docker-compose-file Compose file path to start services
 #   --docker-project-dir  Compose project directory (default: current dir)
+#   --docker-project-name Compose project name/container prefix
+#                         (also used for VS Code DevContainer setup)
 #   --clone-dir           Directory to clone frappe_docker to (default: frappe_docker)
 #                         (used automatically if compose file is missing)
 #   --install-webshop     Install webshop app
@@ -63,6 +65,7 @@ SKIP_BENCH_INIT=false
 SKIP_DOCKER_UP=false
 DOCKER_COMPOSE_FILE=""
 DOCKER_PROJECT_DIR="$(pwd)"
+DOCKER_PROJECT_NAME=""
 INSTALL_WEBSHOP=false
 INSTALL_HRMS=false
 INSTALL_CRM=false
@@ -144,6 +147,8 @@ Options:
   --skip-docker-up      Skip starting Docker services
   --docker-compose-file Compose file path to start services
   --docker-project-dir  Compose project directory (default: current dir)
+  --docker-project-name Compose project name/container prefix
+                        (also used for VS Code DevContainer setup)
   --clone-dir           Directory to clone frappe_docker to (default: frappe_docker)
                         (used automatically if compose file is missing)
   --install-webshop     Install webshop app
@@ -239,6 +244,10 @@ while [[ $# -gt 0 ]]; do
             DOCKER_PROJECT_DIR="$2"
             shift 2
             ;;
+        --docker-project-name)
+            DOCKER_PROJECT_NAME="$2"
+            shift 2
+            ;;
         --install-webshop)
             INSTALL_WEBSHOP=true
             shift
@@ -280,6 +289,54 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+delegate_to_no_docker_setup() {
+    local script_dir
+    local no_docker_script
+    local cmd
+
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    no_docker_script="$script_dir/setup_v16_no_docker.sh"
+
+    if [ ! -f "$no_docker_script" ]; then
+        print_error "Bare-metal delegate script not found: $no_docker_script"
+        print_info "Create setup_v16_no_docker.sh or run without --bare-metal"
+        exit 1
+    fi
+
+    if [ ! -x "$no_docker_script" ]; then
+        chmod +x "$no_docker_script"
+    fi
+
+    cmd=(
+        "$no_docker_script"
+        --bench-name "$BENCH_NAME"
+        --site-name "$SITE_NAME"
+        --admin-password "$ADMIN_PASSWORD"
+        --db-root-password "$DB_ROOT_PASSWORD"
+        --python-version "$PYTHON_VERSION"
+        --node-version "$NODE_VERSION"
+    )
+
+    if [ "$SKIP_BENCH_INIT" = true ]; then
+        cmd+=(--skip-bench-init)
+    fi
+    if [ "$INSTALL_WEBSHOP" = true ]; then
+        cmd+=(--install-webshop)
+    fi
+    if [ "$INSTALL_HRMS" = true ]; then
+        cmd+=(--install-hrms)
+    fi
+    if [ "$INSTALL_CRM" = true ]; then
+        cmd+=(--install-crm)
+    fi
+    if [ "$INSTALL_DEPS" = true ]; then
+        cmd+=(--install-deps)
+    fi
+
+    print_info "Delegating --bare-metal setup to $no_docker_script"
+    exec "${cmd[@]}"
+}
 
 #######################################################################
 # DevContainer Detection
@@ -493,6 +550,12 @@ start_docker_services() {
     fi
 
     print_step "Starting MariaDB and Redis services using $COMPOSE_FILE_RESOLVED..."
+    local compose_project_args=()
+    if [ -n "$DOCKER_PROJECT_NAME" ]; then
+        compose_project_args=(-p "$DOCKER_PROJECT_NAME")
+        print_info "Using Docker Compose project name: $DOCKER_PROJECT_NAME"
+    fi
+
     local services="$DB_SERVICE $REDIS_CACHE_SERVICE"
     if [ "$REDIS_QUEUE_SERVICE" != "$REDIS_CACHE_SERVICE" ]; then
         services="$services $REDIS_QUEUE_SERVICE"
@@ -502,9 +565,9 @@ start_docker_services() {
     fi
 
     if [ "$COMPOSE_CMD" = "docker compose" ]; then
-        docker compose -f "$COMPOSE_FILE_RESOLVED" up -d $services
+        docker compose -f "$COMPOSE_FILE_RESOLVED" "${compose_project_args[@]}" up -d $services
     else
-        docker-compose -f "$COMPOSE_FILE_RESOLVED" up -d $services
+        docker-compose -f "$COMPOSE_FILE_RESOLVED" "${compose_project_args[@]}" up -d $services
     fi
     print_success "Docker services started"
 
@@ -598,6 +661,49 @@ setup_devcontainer() {
     fi
 }
 
+configure_devcontainer_project_name() {
+    local devcontainer_dir
+    local env_file
+    local tmp_file
+
+    if [ -z "$DOCKER_PROJECT_NAME" ]; then
+        return 0
+    fi
+
+    if [ ! -d "$CLONE_DIR_ABS" ]; then
+        return 0
+    fi
+
+    devcontainer_dir="$CLONE_DIR_ABS/.devcontainer"
+    env_file="$devcontainer_dir/.env"
+
+    mkdir -p "$devcontainer_dir"
+    print_step "Configuring DevContainer compose project name..."
+
+    if [ -f "$env_file" ]; then
+        tmp_file="$(mktemp)"
+        awk -v value="$DOCKER_PROJECT_NAME" '
+            BEGIN { replaced=0 }
+            /^COMPOSE_PROJECT_NAME=/ {
+                print "COMPOSE_PROJECT_NAME=" value
+                replaced=1
+                next
+            }
+            { print }
+            END {
+                if (!replaced) {
+                    print "COMPOSE_PROJECT_NAME=" value
+                }
+            }
+        ' "$env_file" > "$tmp_file"
+        mv "$tmp_file" "$env_file"
+    else
+        printf 'COMPOSE_PROJECT_NAME=%s\n' "$DOCKER_PROJECT_NAME" > "$env_file"
+    fi
+
+    print_success "DevContainer compose project name set to '$DOCKER_PROJECT_NAME'"
+}
+
 setup_vscode_config() {
     print_header "Setting Up VS Code Configuration"
     
@@ -667,9 +773,15 @@ show_vscode_instructions() {
 }
 
 run_vscode_init() {
+    if [ -n "$DOCKER_PROJECT_NAME" ] && [ "$CLONE_DIR" = "frappe_docker" ]; then
+        CLONE_DIR="$DOCKER_PROJECT_NAME"
+        print_info "Using --docker-project-name as clone dir: $CLONE_DIR"
+    fi
+
     clone_frappe_docker
     sync_script_into_development
     setup_devcontainer
+    configure_devcontainer_project_name
     setup_vscode_config
     install_vscode_extensions
     show_vscode_instructions
@@ -824,6 +936,11 @@ show_nvm_install_help() {
 # If --init-vscode is set, run VS Code initialization and exit
 if [ "$INIT_VSCODE" = true ]; then
     run_vscode_init
+fi
+
+# If --bare-metal is set, delegate to dedicated non-Docker script
+if [ "$BARE_METAL" = true ]; then
+    delegate_to_no_docker_setup
 fi
 
 # Check if running in DevContainer
